@@ -1,0 +1,100 @@
+# The checks of the database chart itself, next to the organization's service pipeline (RSO-ekipa10/.github,
+# service-ci-cd.yml), which ci-cd.yml calls with build-image: false (no Node.js steps, no image) and which also
+# deploys the chart. The shared workflow does not know the database, so this file keeps what only the database needs:
+# workflow lint, strict chart lint, the rendered manifests against the Kubernetes schemas of the cluster version, the
+# rules of the database, the schema refusals, and the setup Job's own script run twice against a throwaway PostgreSQL
+# server with the chart's image and security settings. Nothing here deploys; how the database gets to the cluster is in
+# README.md, "Deploy".
+#
+# Called by ci-cd.yml from a job with the id "chart-rules", so the check is named "chart-rules / test". The job id
+# test is part of that name: rename it only together with the branch ruleset.
+#
+# Every action is pinned to a full commit SHA (the same SHAs as the organization's workflow); Dependabot proposes
+# the action updates. The tool versions in "env" below are bumped by hand.
+name: chart-ci
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit bash also turns on pipefail, so a failing command on the left of a pipe fails the step.
+    shell: bash
+
+env:
+  HELM_VERSION: v4.3.1 # Helm 4 (ADR-047), as in the organization's workflow
+  ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
+  KUBERNETES_VERSION: 1.35.0 # schema version of the kinds: the minor version of the cluster
+  NAMESPACE: prod
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Workflow lint (actionlint, includes shellcheck)
+        run: docker run --rm -v "$PWD":/repo -w /repo "$ACTIONLINT_IMAGE" -color
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm is version 4
+        run: |
+          helm version --short
+          [[ "$(helm version --short)" == v4.* ]] || { echo "::error::expected Helm 4 ($HELM_VERSION)"; exit 1; }
+
+      - name: Chart lint (default, dev and prod values)
+        run: |
+          helm lint helm --namespace "$NAMESPACE" --strict
+          helm lint helm --namespace "$NAMESPACE" --strict -f helm/values-dev.yaml
+          helm lint helm --namespace "$NAMESPACE" --strict -f helm/values-prod.yaml
+
+      - name: Manifests match the Kubernetes schemas (dev and prod values)
+        run: |
+          for values in dev prod; do
+            echo "::group::database chart, $values values"
+            helm template database helm --namespace "$NAMESPACE" -f "helm/values-$values.yaml" > "render-$values.yaml"
+            docker run --rm -i "$KUBECONFORM_IMAGE" -strict -summary -kubernetes-version "$KUBERNETES_VERSION" - < "render-$values.yaml"
+            echo "::endgroup::"
+          done
+
+      - name: Rules of the database (what the services and the plan rely on)
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          for values in dev prod; do
+            file="render-$values.yaml"
+            # The client Service is called postgres: every DATABASE_URL and identity's KC_DB_URL use postgres:5432.
+            [[ "$(helm template database helm --namespace "$NAMESPACE" -f "helm/values-$values.yaml" --show-only templates/services.yaml | grep -c -E '^  name: postgres$')" == "1" ]] || fail "$values: the client Service is not called postgres"
+            # ClusterIP only: never a load balancer, a node port or a host port.
+            if grep -n -E 'type: (LoadBalancer|NodePort)|nodePort:|hostPort:|hostNetwork:' "$file"; then fail "$values: the database is exposed outside the cluster"; fi
+            # One server with its data on a claim.
+            grep -q -E '^kind: StatefulSet$' "$file" || fail "$values: no StatefulSet"
+            grep -q -E '^  replicas: 1$' "$file" || fail "$values: the StatefulSet is not one replica"
+            grep -q -E 'volumeClaimTemplates:' "$file" || fail "$values: the data has no PersistentVolumeClaim"
+            # Every image by digest.
+            if grep -E '^[[:space:]]+image:' "$file" | grep -v -q '@sha256:[a-f0-9]\{64\}'; then fail "$values: an image is not pinned by digest"; fi
+            # Passwords only from the existing Secret: the chart never renders a Secret.
+            if grep -q -E '^kind: Secret$' "$file"; then fail "$values: the chart renders a Secret"; fi
+            # The roles and databases are created by the hook Job after install and upgrade.
+            grep -q -E 'helm\.sh/hook"?:[[:space:]]*"?post-install,post-upgrade' "$file" || fail "$values: no setup Job hook"
+            # Without a test hook "helm test" passes without testing anything after a deploy.
+            grep -Eq 'helm\.sh/hook"?:[[:space:]]*"?test' "$file" || fail "$values: the chart has no helm test hook (templates/tests/)"
+          done
+          # Prod admits port 5432 only to the Chance services, the setup Job and the access test.
+          grep -q -E '^kind: NetworkPolicy$' render-prod.yaml || fail "prod: no NetworkPolicy rendered"
+
+      - name: The values schema refuses what it promises to refuse
+        run: scripts/schema-refusals.sh
+
+      - name: The setup Job's script against a throwaway PostgreSQL server (twice, access test, rotated password)
+        # The image and arguments come from the rendered StatefulSet; PyYAML is preinstalled on the runner.
+        run: scripts/test-setup.sh

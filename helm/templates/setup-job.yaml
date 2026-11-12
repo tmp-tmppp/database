@@ -1,0 +1,69 @@
+# Creates every missing role and database after each install and upgrade and applies the passwords of the Secret
+# (files/setup-databases.sh). A Helm hook: Helm waits for it, and when it fails the deploy fails and the pipeline rolls
+# back. The last run is kept (before-hook-creation) so its log can be read until the next deploy.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "database.name" . }}-setup
+  labels:
+    {{- include "database.labels" . | nindent 4 }}
+    app.kubernetes.io/component: setup
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.setupJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.setupJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "database.labels" . | nindent 8 }}
+        app.kubernetes.io/component: setup
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "database.podSecurity" . | nindent 6 }}
+      restartPolicy: Never
+      containers:
+        - name: setup
+          image: {{ include "database.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "/etc/postgres-setup/setup-databases.sh"]
+          env:
+            - name: PGHOST
+              value: {{ include "database.name" . | quote }}
+            - name: PGPORT
+              value: {{ .Values.port | quote }}
+            - name: SUPERUSER
+              value: {{ .Values.superuser.name | quote }}
+            - name: SUPERUSER_PASSWORD_KEY
+              value: {{ .Values.superuser.passwordKey | quote }}
+            - name: HOME
+              value: /tmp
+          resources:
+            {{- toYaml .Values.setupJob.resources | nindent 12 }}
+          {{- include "database.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - name: setup
+              mountPath: /etc/postgres-setup
+              readOnly: true
+            - name: secrets
+              mountPath: /run/secrets/database
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: setup
+          configMap:
+            name: {{ include "database.name" . }}-setup
+            defaultMode: 0444
+        - name: secrets
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

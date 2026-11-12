@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Values of the database chart",
+  "description": "Refuses what would break the contract with the services (the Service postgres on port 5432, the superuser name), unknown keys at every level, an image without a digest, and anything but a key name where a password would go: passwords live only in the Secret named by existingSecret. Uniqueness of names and the connection budget are checked by the templates (_helpers.tpl).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["serviceName", "port", "image", "existingSecret", "superuser", "databases", "config", "resources", "persistence", "terminationGracePeriodSeconds", "setupJob", "test", "networkPolicy", "podAnnotations"],
+  "definitions": {
+    "sqlName": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+      "not": { "pattern": "^pg_" },
+      "description": "A database or role name: lower case, digits and underscores, not starting with pg_ (reserved)"
+    },
+    "passwordKey": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*_PASSWORD$",
+      "description": "The name of a key in the Secret (upper case, ending in _PASSWORD), never a password"
+    },
+    "connectionLimit": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "memory": { "type": "string", "pattern": "^[0-9]+(Mi|Gi)$" },
+    "cpu": { "type": "string", "pattern": "^[0-9]+m$" },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": { "$ref": "#/definitions/cpu" },
+            "memory": { "$ref": "#/definitions/memory" }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["memory"],
+          "description": "Memory only: a CPU limit only throttles",
+          "properties": {
+            "memory": { "$ref": "#/definitions/memory" }
+          }
+        }
+      }
+    }
+  },
+  "properties": {
+    "serviceName": { "const": "postgres", "description": "Every service connects to postgres:5432 (identity's KC_DB_URL fixes it)" },
+    "port": { "const": 5432 },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "pattern": "^18\\.[0-9]+-alpine$", "description": "PostgreSQL 18 (ADR-028: uuidv7()), the alpine image whose user id 70 the security settings use" },
+        "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$", "description": "A tag can move; a digest cannot" },
+        "pullPolicy": { "enum": ["IfNotPresent", "Always"] }
+      }
+    },
+    "existingSecret": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+      "description": "Name of the Secret with the passwords (database-env, created by the pipeline)"
+    },
+    "superuser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "passwordKey"],
+      "properties": {
+        "name": { "const": "postgres", "description": "The image's default superuser; the probes and the Job use it" },
+        "passwordKey": { "$ref": "#/definitions/passwordKey" }
+      }
+    },
+    "databases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "role", "passwordKey", "app", "connectionLimit", "extraRoles"],
+        "properties": {
+          "name": { "$ref": "#/definitions/sqlName" },
+          "role": { "$ref": "#/definitions/sqlName" },
+          "passwordKey": { "$ref": "#/definitions/passwordKey" },
+          "app": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "description": "The label app.kubernetes.io/name of the service's Pods"
+          },
+          "connectionLimit": { "$ref": "#/definitions/connectionLimit" },
+          "extraRoles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "passwordKey", "connectionLimit"],
+              "properties": {
+                "name": { "$ref": "#/definitions/sqlName" },
+                "passwordKey": { "$ref": "#/definitions/passwordKey" },
+                "connectionLimit": { "$ref": "#/definitions/connectionLimit" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["max_connections"],
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+      "properties": {
+        "max_connections": { "type": "string", "pattern": "^[0-9]+$" }
+      }
+    },
+    "resources": { "$ref": "#/definitions/resources" },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "storageClassName"],
+      "properties": {
+        "size": { "type": "string", "pattern": "^[0-9]+Gi$" },
+        "storageClassName": { "type": "string" }
+      }
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30, "maximum": 300 },
+    "setupJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backoffLimit", "activeDeadlineSeconds", "resources"],
+      "properties": {
+        "backoffLimit": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 60, "maximum": 280, "description": "Below the pipeline's helm --timeout of 5 minutes" },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resources"],
+      "properties": {
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "description": "Set by the organization's workflow (checksum/app-env); lands on the setup Job's Pod only",
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{{- if .Values.networkPolicy.enabled }}
+# Ingress to the PostgreSQL server on port 5432 only, from
+#   the Pods of the services that own a database here, by the label app.kubernetes.io/name their charts put on their
+#   Pods (databases[].app: tenants, payments, audit, markets, trading, market-data, identity), and
+#   the setup Job and the access test of this release.
+# Nothing else gets in: no other namespace, no gateway, no outside address. The server calls nothing, so there is no
+# egress rule (the policy covers Ingress only). Needs a network policy engine in the cluster (README, "Follow-ups").
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "database.name" . }}
+  labels:
+    {{- include "database.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "database.serverSelectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  {{- range (.Values.databases | default list) }}
+                  - {{ .app | quote }}
+                  {{- end }}
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values: [{{ .Release.Name | quote }}]
+              - key: app.kubernetes.io/component
+                operator: In
+                values: ["setup", "test"]
+      ports:
+        - port: {{ .Values.port }}
+          protocol: TCP
+{{- end }}

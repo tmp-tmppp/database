@@ -1,0 +1,153 @@
+# Values of the database chart: one PostgreSQL 18 server for every Chance service that keeps data (plan DM-01,
+# ADR-029), with one database and one least-privileged login role per service. The sizes here are the prod sizes (one
+# small node, README "Memory and disk"); values-prod.yaml switches the NetworkPolicy on. Every value has its reason
+# next to it; values.schema.json refuses typos, other names for the Service and anything that is not a key name where
+# a password would go.
+
+# The client Service. identity's chart fixes jdbc:postgresql://postgres:5432/keycloak and every service's
+# DATABASE_URL uses the same host and port, so the schema refuses any other name or port.
+serviceName: postgres
+port: 5432
+
+image:
+  # postgres:18.6-alpine, the tag of the services' compose files and of infrastructure/local, pinned by the digest of
+  # its multi-platform index (read from Docker Hub on 2026-11-11). A tag can move; a digest cannot. The setup Job and
+  # the access test run the same image (it brings psql and pg_isready).
+  repository: docker.io/library/postgres
+  tag: 18.6-alpine
+  digest: sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
+  pullPolicy: IfNotPresent
+
+# The Secret that holds every password of this chart. The pipeline creates it as "database-env" from the organization
+# secret DATABASE_ENV (README "The Secret"); this chart never creates it and holds only the names of its keys.
+existingSecret: database-env
+
+# The superuser that initdb creates on an empty volume. Its password is read from the Secret only then (initdb) and by
+# the setup Job to log in; changing it later is a manual step (README "Rotate a password").
+superuser:
+  name: postgres
+  passwordKey: POSTGRES_PASSWORD
+
+# One database and one login role per service (the names of infrastructure/local/postgres/init/10-create-databases.sql).
+#   name             the database
+#   role             its login role; the setup Job makes it the owner of the database, nothing more
+#   passwordKey      the key of the role's password in the Secret
+#   app              the label app.kubernetes.io/name of the service's Pods (its chart name): the NetworkPolicy admits it
+#   connectionLimit  CONNECTION LIMIT of the role, a bulkhead: one service with a leaking pool cannot take every
+#                    connection of the server. The services' pools are 5 (DATABASE_POOL_MAX): one Pod leaves 5 free,
+#                    and two Pods during a rolling update fill all 10. Keep at least one connection free per role:
+#                    PostgreSQL checks the role's limit before anything else, so a role at its limit is refused on
+#                    every database, also by the access test ("too many connections for role"). The sum of all limits
+#                    plus 5 must stay at or below max_connections.
+#   extraRoles       further login roles of the service (for example a runtime role that may only INSERT and SELECT,
+#                    separate from the migration owner, ADR-056). Each can connect to this database and owns nothing:
+#                    the Job grants it CONNECT only; the service's own migrations grant the rest. Example:
+#                      extraRoles:
+#                        - name: trading_app
+#                          passwordKey: TRADING_APP_DB_PASSWORD
+#                          connectionLimit: 10
+databases:
+  - name: tenants
+    role: tenants
+    passwordKey: TENANTS_DB_PASSWORD
+    app: tenants
+    connectionLimit: 10
+    extraRoles: []
+  - name: payments
+    role: payments
+    passwordKey: PAYMENTS_DB_PASSWORD
+    app: payments
+    connectionLimit: 10
+    extraRoles: []
+  - name: audit
+    role: audit
+    passwordKey: AUDIT_DB_PASSWORD
+    app: audit
+    connectionLimit: 10
+    extraRoles: []
+  - name: markets
+    role: markets
+    passwordKey: MARKETS_DB_PASSWORD
+    app: markets
+    connectionLimit: 10
+    extraRoles: []
+  - name: trading
+    role: trading
+    passwordKey: TRADING_DB_PASSWORD
+    app: trading
+    connectionLimit: 10
+    extraRoles: []
+  - name: market_data
+    role: market_data
+    passwordKey: MARKET_DATA_DB_PASSWORD
+    app: market-data
+    connectionLimit: 10
+    extraRoles: []
+  # Keycloak (the identity chart): its pool at most 15 (KC_DB_POOL_MAX_SIZE, README "Deploy"), so the access test, an
+  # admin session and a second Keycloak Pod during a rollout still find a free connection.
+  - name: keycloak
+    role: keycloak
+    passwordKey: KEYCLOAK_DB_PASSWORD
+    app: identity
+    connectionLimit: 20
+    extraRoles: []
+
+# Server settings, passed as "-c name=value". Small on purpose: about 80 connections at most (the limits above), a
+# 128 MB buffer cache, and WAL capped at 512 MB so a burst of writes cannot fill the small volume.
+config:
+  max_connections: "100"
+  shared_buffers: 128MB
+  max_wal_size: 512MB
+
+# Memory: shared_buffers plus a few MB per open connection, about 300-400 MB with the expected 40 connections. The
+# request is that working set, so under memory pressure the kubelet evicts Pods that use more than they asked for
+# before the database; the limit is the ceiling before the kernel stops the server (README "Memory and disk").
+# Measured at M1 and moved then. No CPU limit, as in the service charts: a CPU limit only throttles.
+resources:
+  requests:
+    cpu: 100m
+    memory: 384Mi
+  limits:
+    memory: 768Mi
+
+persistence:
+  # One Azure disk for all databases. Resizing: README "Resize the volume" (the claim template cannot change in place).
+  size: 8Gi
+  # Empty = the cluster's default class (AKS: "default", Azure Disk CSI, Standard SSD, volume expansion allowed).
+  storageClassName: ""
+
+# The image's stop signal SIGINT already gives a fast shutdown (disconnect clients, checkpoint, exit); the preStop
+# hook (pg_ctl stop --mode=fast) is a second guard in case a runtime sent SIGTERM, a "smart" shutdown that would wait
+# for every pooled connection. 60 s leaves time for the shutdown checkpoint; only after that does the kubelet kill
+# the server (crash recovery at the next start).
+terminationGracePeriodSeconds: 60
+
+# The Job that creates the roles and databases after every install and upgrade (a Helm hook).
+setupJob:
+  backoffLimit: 3
+  activeDeadlineSeconds: 240
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+# The "helm test" Pod: each role reaches its own database and is refused on every other one.
+test:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+# Off by default like the other charts; values-prod.yaml switches it on. Admits port 5432 only from the Pods named in
+# databases[].app, the setup Job and the access test of this release.
+networkPolicy:
+  enabled: false
+
+# Set by the organization's workflow (podAnnotations.checksum/app-env, a hash of DATABASE_ENV). Applied to the setup
+# Job's Pod only: the server reads the Secret only at initdb, so a changed password must not restart it; the Job runs
+# on every deploy anyway and applies the new passwords.
+podAnnotations: {}

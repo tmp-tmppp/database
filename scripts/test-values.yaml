@@ -1,0 +1,48 @@
+# Values for scripts/test-setup.sh only: the prod values plus one extra login role for trading (the runtime role of
+# ADR-056), so the test also covers extraRoles. A list replaces the whole list, so all databases are repeated here.
+databases:
+  - name: tenants
+    role: tenants
+    passwordKey: TENANTS_DB_PASSWORD
+    app: tenants
+    connectionLimit: 10
+    extraRoles: []
+  - name: payments
+    role: payments
+    passwordKey: PAYMENTS_DB_PASSWORD
+    app: payments
+    connectionLimit: 10
+    extraRoles: []
+  - name: audit
+    role: audit
+    passwordKey: AUDIT_DB_PASSWORD
+    app: audit
+    connectionLimit: 10
+    extraRoles: []
+  - name: markets
+    role: markets
+    passwordKey: MARKETS_DB_PASSWORD
+    app: markets
+    connectionLimit: 10
+    extraRoles: []
+  - name: trading
+    role: trading
+    passwordKey: TRADING_DB_PASSWORD
+    app: trading
+    connectionLimit: 10
+    extraRoles:
+      - name: trading_app
+        passwordKey: TRADING_APP_DB_PASSWORD
+        connectionLimit: 10
+  - name: market_data
+    role: market_data
+    passwordKey: MARKET_DATA_DB_PASSWORD
+    app: market-data
+    connectionLimit: 10
+    extraRoles: []
+  - name: keycloak
+    role: keycloak
+    passwordKey: KEYCLOAK_DB_PASSWORD
+    app: identity
+    connectionLimit: 20
+    extraRoles: []

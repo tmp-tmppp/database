@@ -1,0 +1,52 @@
+# "helm test" after every deploy: every role reaches its own database and is refused on every other one
+# (files/check-access.sh). A failure fails the test and the pipeline rolls the release back (ADR-048). The same script
+# was run against the chart's image with the chart's security settings before it went in (README, "Checks").
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "database.name" . }}-access-test
+  labels:
+    {{- include "database.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  {{- include "database.podSecurity" . | nindent 2 }}
+  restartPolicy: Never
+  containers:
+    - name: access-test
+      image: {{ include "database.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["sh", "/etc/postgres-setup/check-access.sh"]
+      env:
+        - name: PGHOST
+          value: {{ include "database.name" . | quote }}
+        - name: PGPORT
+          value: {{ .Values.port | quote }}
+        - name: HOME
+          value: /tmp
+      resources:
+        {{- toYaml .Values.test.resources | nindent 8 }}
+      {{- include "database.containerSecurity" . | nindent 6 }}
+      volumeMounts:
+        - name: setup
+          mountPath: /etc/postgres-setup
+          readOnly: true
+        - name: secrets
+          mountPath: /run/secrets/database
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: setup
+      configMap:
+        name: {{ include "database.name" . }}-setup
+        defaultMode: 0444
+    - name: secrets
+      secret:
+        secretName: {{ .Values.existingSecret }}
+        defaultMode: 0440
+    - name: tmp
+      emptyDir:
+        sizeLimit: 16Mi

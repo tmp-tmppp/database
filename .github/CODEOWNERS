@@ -1,0 +1,5 @@
+# The database holds the data of every service: changes to the pipeline, the chart and the test scripts are reviewed
+# by the other team member.
+/.github/ @radov02 @DominikkMaximus
+/helm/ @radov02 @DominikkMaximus
+/scripts/ @radov02 @DominikkMaximus

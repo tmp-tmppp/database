@@ -1,0 +1,9 @@
+# Secrets and local files never go into the repository.
+.env
+.env.*
+!.env.example
+*.env
+# Rendered manifests of local checks.
+render-*.yaml
+reports/
+__pycache__/

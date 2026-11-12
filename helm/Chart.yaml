@@ -1,0 +1,7 @@
+apiVersion: v2
+name: database
+description: Database server of Chance. One PostgreSQL 18 server (StatefulSet, one volume) with one database and one least-privileged login role per service, created by an idempotent Job; a NetworkPolicy for the Chance services and an access test.
+type: application
+# Chart version: bump on every change to the chart. appVersion is the PostgreSQL version of the pinned image.
+version: 0.1.0
+appVersion: "18.6"

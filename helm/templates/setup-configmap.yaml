@@ -1,0 +1,15 @@
+# The setup Job's script, the access test's script and the list of roles both read (no passwords: only key names).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "database.name" . }}-setup
+  labels:
+    {{- include "database.labels" . | nindent 4 }}
+    app.kubernetes.io/component: setup
+data:
+  roles.conf: |
+    {{- include "database.rolesConf" . | nindent 4 }}
+  setup-databases.sh: |
+    {{- .Files.Get "files/setup-databases.sh" | nindent 4 }}
+  check-access.sh: |
+    {{- .Files.Get "files/check-access.sh" | nindent 4 }}

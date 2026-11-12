@@ -1,0 +1,6 @@
+# Dev overrides. There is no dev cluster (plan section 5: dev is the local machine, where infrastructure/local's compose
+# file runs the same server with the same database and role names); the pipeline only lints and renders the chart with
+# this file. A smaller disk, the rest as in values.yaml; the NetworkPolicy stays off.
+persistence:
+  size: 2Gi
+  storageClassName: ""

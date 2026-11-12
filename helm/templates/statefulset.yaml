@@ -1,0 +1,129 @@
+# The PostgreSQL server: one replica on one Azure disk (claim data-postgres-0). The image's entrypoint runs initdb on
+# an empty volume (superuser password from the Secret; scram-sha-256 for every TCP login, also from 127.0.0.1, and
+# peer for the local socket) and otherwise just starts the server. It runs as the image's postgres user (70) on a read-only root
+# file system; the server writes only to its volume, the socket directory and /tmp. PGDATA is the image's
+# /var/lib/postgresql/18/docker, a directory below the mount point, so the disk's lost+found does not get in the way.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "database.name" . }}
+  labels:
+    {{- include "database.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  serviceName: {{ include "database.name" . }}-headless
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  # The claim survives "helm uninstall" and a scale to zero: data is deleted only by hand.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "database.serverSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      # Only labels that never change with the chart version: helm.sh/chart and app.kubernetes.io/version stay on the
+      # object metadata, so a chart bump for the Job, the test or an extra role does not restart the server. Only a
+      # change of the image, the server arguments, the resources or the security settings does.
+      labels:
+        {{- include "database.serverSelectorLabels" . | nindent 8 }}
+        app.kubernetes.io/part-of: chance
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+    spec:
+      {{- include "database.podSecurity" . | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: postgres
+          image: {{ include "database.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - postgres
+            {{- range $name, $value := .Values.config }}
+            - -c
+            - {{ printf "%s=%s" $name $value | quote }}
+            {{- end }}
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.superuser.name | quote }}
+            - name: POSTGRES_PASSWORD_FILE
+              value: /run/secrets/database/{{ .Values.superuser.passwordKey }}
+            # Only read by initdb on an empty volume.
+            - name: POSTGRES_INITDB_ARGS
+              value: "--auth-local=peer --auth-host=scram-sha-256"
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          # pg_isready over TCP: ready only when the real server listens (initdb's temporary server uses the socket
+          # only). The startup probe gives a first start up to 5 minutes for initdb.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-p", "{{ .Values.port }}", "-U", "{{ .Values.superuser.name }}", "-d", "postgres"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-p", "{{ .Values.port }}", "-U", "{{ .Values.superuser.name }}", "-d", "postgres"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-p", "{{ .Values.port }}", "-U", "{{ .Values.superuser.name }}", "-d", "postgres"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          lifecycle:
+            # The image's STOPSIGNAL is SIGINT, which the container runtime sends and postgres already takes as a fast
+            # shutdown (disconnect clients, checkpoint, exit). This hook is a second guard that starts the same fast
+            # shutdown even if a runtime sent SIGTERM (a smart shutdown that waits for every pooled connection); a
+            # stop signal that arrives during a fast shutdown changes nothing. --no-wait: a waiting pg_ctl would be
+            # killed with the container and report a failed hook. pg_ctl finds the data directory in PGDATA.
+            preStop:
+              exec:
+                command: ["pg_ctl", "stop", "--mode=fast", "--no-wait"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- include "database.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+            - name: superuser-password
+              mountPath: /run/secrets/database
+              readOnly: true
+      volumes:
+        - name: run
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        # Only the superuser's key; group-readable for the postgres group (fsGroup 70).
+        - name: superuser-password
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.superuser.passwordKey }}
+                path: {{ .Values.superuser.passwordKey }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "database.serverSelectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

@@ -1,0 +1,35 @@
+# The client Service "postgres": the host in every service's DATABASE_URL and in identity's KC_DB_URL. ClusterIP only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "database.name" . }}
+  labels:
+    {{- include "database.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "database.serverSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: {{ .Values.port }}
+      targetPort: postgres
+      protocol: TCP
+---
+# The headless Service the StatefulSet needs for its Pod's stable name (postgres-0.postgres-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "database.name" . }}-headless
+  labels:
+    {{- include "database.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  clusterIP: None
+  selector:
+    {{- include "database.serverSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: {{ .Values.port }}
+      targetPort: postgres
+      protocol: TCP

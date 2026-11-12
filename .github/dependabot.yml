@@ -1,0 +1,14 @@
+# Weekly update pull requests for the pinned actions; minor and patch updates come as one pull request.
+# Not covered, on purpose: the PostgreSQL image pinned by digest in helm/values.yaml. Dependabot does not read Helm
+# values, and a new image is checked by hand against the services' compose files (README, "Update the image").
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch
